@@ -1,8 +1,21 @@
 #include <Arduino.h>
 
-extern "C" {
-  #include <user_interface.h>
-}
+
+#ifdef ARDUINO_ARCH_ESP32
+  #include <WiFi.h>
+  #include "esp_wifi.h"
+#else
+  extern "C" {
+    #include <user_interface.h>
+  }
+#endif
+
+// Define TX and RX pins for UART (change if needed)
+#define TXD1 19
+#define RXD1 21
+
+// Use Serial1 for UART communication
+HardwareSerial otherSerial(1);
 
 #define DATA_LENGTH           112
 
@@ -10,6 +23,72 @@ extern "C" {
 #define TYPE_CONTROL          0x01
 #define TYPE_DATA             0x02
 #define SUBTYPE_PROBE_REQUEST 0x04
+
+#ifdef ARDUINO_ARCH_ESP32
+
+static int currentChannel = 1;
+
+static void printDataSpan(uint16_t start, uint16_t size, const uint8_t* data) {
+  for(uint16_t i = start; i < DATA_LENGTH && i < start+size; i++) {
+    Serial.write(data[i]);
+    otherSerial.write(data[i]);
+  }
+}
+
+static void getMAC(char *addr, const uint8_t* data, uint16_t offset) {
+  sprintf(addr, "%02x:%02x:%02x:%02x:%02x:%02x",
+          data[offset+0], data[offset+1], data[offset+2],
+          data[offset+3], data[offset+4], data[offset+5]);
+}
+
+static void showMetadata(const wifi_promiscuous_pkt_t *pkt) {
+  const uint8_t *data = pkt->payload;
+  if (!data) return;
+
+  unsigned int frameControl = ((unsigned int)data[1] << 8) + data[0];
+
+  uint8_t frameType    = (frameControl & 0b0000000000001100) >> 2;
+  uint8_t frameSubType = (frameControl & 0b0000000011110000) >> 4;
+
+  if (frameType != TYPE_MANAGEMENT || frameSubType != SUBTYPE_PROBE_REQUEST) return;
+
+  Serial.print("RSSI: ");
+  otherSerial.print("RSSI: ");
+  Serial.print(pkt->rx_ctrl.rssi);
+  otherSerial.print(pkt->rx_ctrl.rssi);
+
+  Serial.print(" Ch: ");
+  otherSerial.print(" Ch: ");
+  Serial.print(currentChannel);
+  otherSerial.print(currentChannel);
+
+
+  char addr[] = "00:00:00:00:00:00";
+  getMAC(addr, data, 10);
+  Serial.print(" Peer MAC: ");
+  otherSerial.print(" Peer MAC: ");
+  Serial.print(addr);
+  otherSerial.print(addr);
+
+  uint8_t SSID_length = data[25];
+  Serial.print(" SSID: ");
+  otherSerial.print(" SSID: ");
+  printDataSpan(26, SSID_length, data);
+  
+  Serial.println();
+  otherSerial.println();
+}
+
+static void sniffer_callback(void* buf, wifi_promiscuous_pkt_type_t type) {
+  if (!buf) return;
+  const wifi_promiscuous_pkt_t *pkt = (const wifi_promiscuous_pkt_t*) buf;
+  showMetadata(pkt);
+}
+
+#define CHANNEL_HOP_INTERVAL_MS   1000
+static unsigned long lastHop = 0;
+
+#else // ESP8266 branch (original code)
 
 struct RxControl {
  signed rssi:8; // signal intensity of packet
@@ -120,13 +199,31 @@ void channelHop()
   wifi_set_channel(new_channel);
 }
 
+#endif // ARDUINO_ARCH_ESP32
+
 #define DISABLE 0
 #define ENABLE  1
 
 void setup() {
-  // set the WiFi chip to "promiscuous" mode aka monitor mode
   Serial.begin(115200);
+  otherSerial.begin(9600, SERIAL_8N1, RXD1, TXD1);  // UART setup
   delay(10);
+
+#ifdef ARDUINO_ARCH_ESP32
+  WiFi.mode(WIFI_MODE_STA);
+  WiFi.disconnect(true);
+  delay(100);
+
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  esp_wifi_init(&cfg);
+  esp_wifi_set_mode(WIFI_MODE_STA);
+  esp_wifi_start();
+
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_promiscuous_rx_cb(&sniffer_callback);
+  esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+  currentChannel = 1;
+#else
   wifi_set_opmode(STATION_MODE);
   wifi_set_channel(1);
   wifi_promiscuous_enable(DISABLE);
@@ -139,8 +236,20 @@ void setup() {
   os_timer_disarm(&channelHop_timer);
   os_timer_setfn(&channelHop_timer, (os_timer_func_t *) channelHop, NULL);
   os_timer_arm(&channelHop_timer, CHANNEL_HOP_INTERVAL_MS, 1);
+#endif
 }
 
 void loop() {
+#ifdef ARDUINO_ARCH_ESP32
+  unsigned long now = millis();
+  if (now - lastHop >= CHANNEL_HOP_INTERVAL_MS) {
+    lastHop = now;
+    currentChannel++;
+    if (currentChannel > 13) currentChannel = 1;
+    esp_wifi_set_channel(currentChannel, WIFI_SECOND_CHAN_NONE);
+  }
   delay(10);
+#else
+  delay(10);
+#endif
 }
