@@ -4,18 +4,18 @@
 #ifdef ARDUINO_ARCH_ESP32
   #include <WiFi.h>
   #include "esp_wifi.h"
+  // Define TX and RX pins for UART (change if needed)
+  #define TXD1 19
+  #define RXD1 21
+  // Use Serial1 for UART communication
+  HardwareSerial otherSerial(1);
 #else
   extern "C" {
     #include <user_interface.h>
   }
 #endif
 
-// Define TX and RX pins for UART (change if needed)
-#define TXD1 19
-#define RXD1 21
 
-// Use Serial1 for UART communication
-HardwareSerial otherSerial(1);
 
 #define DATA_LENGTH           112
 
@@ -23,6 +23,9 @@ HardwareSerial otherSerial(1);
 #define TYPE_CONTROL          0x01
 #define TYPE_DATA             0x02
 #define SUBTYPE_PROBE_REQUEST 0x04
+
+#define CHANNEL_HOPPING_ENABLE false  // Set to true to enable channel hopping
+#define CHANNEL_TO_SCAN 11  // Set the channel to scan when channel hopping is disabled
 
 #ifdef ARDUINO_ARCH_ESP32
 
@@ -85,7 +88,7 @@ static void sniffer_callback(void* buf, wifi_promiscuous_pkt_type_t type) {
   showMetadata(pkt);
 }
 
-#define CHANNEL_HOP_INTERVAL_MS   350
+#define CHANNEL_HOP_INTERVAL_MS   1000
 static unsigned long lastHop = 0;
 
 #else // ESP8266 branch (original code)
@@ -191,6 +194,7 @@ static os_timer_t channelHop_timer;
  */
 void channelHop()
 {
+  if (!CHANNEL_HOPPING_ENABLE) return;
   // hoping channels 1-13
   uint8 new_channel = wifi_get_channel() + 1;
   if (new_channel > 13) {
@@ -221,32 +225,41 @@ void setup() {
 
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_promiscuous_rx_cb(&sniffer_callback);
-  esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
-  currentChannel = 1;
+  esp_wifi_set_channel(CHANNEL_HOPPING_ENABLE ? 1 : CHANNEL_TO_SCAN, WIFI_SECOND_CHAN_NONE);
+  currentChannel = CHANNEL_HOPPING_ENABLE ? 1 : CHANNEL_TO_SCAN;
 #else
   wifi_set_opmode(STATION_MODE);
-  wifi_set_channel(1);
+  wifi_set_channel(CHANNEL_HOPPING_ENABLE ? 1 : CHANNEL_TO_SCAN);
   wifi_promiscuous_enable(DISABLE);
   delay(10);
   wifi_set_promiscuous_rx_cb(sniffer_callback);
   delay(10);
   wifi_promiscuous_enable(ENABLE);
 
-  // setup the channel hoping callback timer
-  os_timer_disarm(&channelHop_timer);
-  os_timer_setfn(&channelHop_timer, (os_timer_func_t *) channelHop, NULL);
-  os_timer_arm(&channelHop_timer, CHANNEL_HOP_INTERVAL_MS, 1);
+  if (CHANNEL_HOPPING_ENABLE) {
+    // setup the channel hoping callback timer
+    os_timer_disarm(&channelHop_timer);
+    os_timer_setfn(&channelHop_timer, (os_timer_func_t *) channelHop, NULL);
+    os_timer_arm(&channelHop_timer, CHANNEL_HOP_INTERVAL_MS, 1);
+  }
 #endif
 }
 
 void loop() {
 #ifdef ARDUINO_ARCH_ESP32
-  unsigned long now = millis();
-  if (now - lastHop >= CHANNEL_HOP_INTERVAL_MS) {
-    lastHop = now;
-    currentChannel++;
-    if (currentChannel > 13) currentChannel = 1;
-    esp_wifi_set_channel(currentChannel, WIFI_SECOND_CHAN_NONE);
+  if (CHANNEL_HOPPING_ENABLE) {
+    unsigned long now = millis();
+    if (now - lastHop >= CHANNEL_HOP_INTERVAL_MS) {
+      lastHop = now;
+      currentChannel++;
+      if (currentChannel > 13) currentChannel = 1;
+      esp_wifi_set_channel(currentChannel, WIFI_SECOND_CHAN_NONE);
+    }
+  } else {
+    if (currentChannel != CHANNEL_TO_SCAN) {
+      currentChannel = CHANNEL_TO_SCAN;
+      esp_wifi_set_channel(currentChannel, WIFI_SECOND_CHAN_NONE);
+    }
   }
   delay(10);
 #else

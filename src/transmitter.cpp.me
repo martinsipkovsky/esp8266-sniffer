@@ -1,0 +1,175 @@
+#include <Arduino.h>
+
+#ifdef ARDUINO_ARCH_ESP32
+#include <WiFi.h>
+#include "esp_wifi.h"
+#else
+extern "C" {
+#include <user_interface.h>
+}
+#endif
+
+// Configuration
+#define PROBE_SSID "test_ssid"  // SSID to probe for, or empty string for broadcast
+#define PROBE_INTERVAL_MS 1000  // Interval between probe requests
+#define TRANSMIT_CHANNEL 11       // Channel to transmit probe requests on
+
+// Frame buffer size
+#define FRAME_BUF_SIZE 256
+
+// Function prototypes
+void sendProbeRequest();
+void constructProbeRequest(uint8_t *frame, size_t *len);
+
+void setup() {
+  Serial.begin(115200);
+  delay(10);
+
+#ifdef ARDUINO_ARCH_ESP32
+  // Initialize ESP32 WiFi
+  WiFi.mode(WIFI_MODE_STA);
+  WiFi.disconnect(true);
+  delay(100);
+
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  esp_wifi_init(&cfg);
+  esp_wifi_set_mode(WIFI_MODE_STA);
+  esp_wifi_start();
+
+  // Set transmit channel
+  esp_wifi_set_channel(TRANSMIT_CHANNEL, WIFI_SECOND_CHAN_NONE);
+
+  // Set to monitor mode for raw packet transmission
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_promiscuous_rx_cb(NULL);  // No RX callback needed for TX only
+
+  Serial.println("ESP32 WiFi initialized for probe request transmission");
+#else
+  // Initialize ESP8266 WiFi
+  wifi_set_opmode(STATION_MODE);
+  wifi_set_channel(TRANSMIT_CHANNEL);
+  wifi_promiscuous_enable(false);  // Disable promiscuous mode for TX
+  delay(10);
+
+  Serial.println("ESP8266 WiFi initialized for probe request transmission");
+#endif
+
+  Serial.print("Probing for SSID: ");
+  Serial.println(PROBE_SSID[0] ? PROBE_SSID : "broadcast");
+}
+
+void loop() {
+  sendProbeRequest();
+  delay(PROBE_INTERVAL_MS);
+}
+
+void sendProbeRequest() {
+  uint8_t frame[FRAME_BUF_SIZE];
+  size_t frameLen = 0;
+
+  constructProbeRequest(frame, &frameLen);
+
+  if (frameLen == 0) {
+    Serial.println("Failed to construct probe request frame");
+    return;
+  }
+
+#ifdef ARDUINO_ARCH_ESP32
+  // Send using ESP32 API
+  esp_err_t err = esp_wifi_80211_tx(WIFI_IF_STA, frame, frameLen, false);
+  if (err != ESP_OK) {
+    Serial.printf("ESP32 TX failed: %d\n", err);
+  } else {
+    Serial.println("Probe request sent (ESP32)");
+  }
+#else
+  // Send using ESP8266 API
+  if (wifi_send_pkt_freedom(frame, frameLen, false) != 0) {
+    Serial.println("ESP8266 TX failed");
+  } else {
+    Serial.println("Probe request sent (ESP8266)");
+  }
+#endif
+}
+
+void constructProbeRequest(uint8_t *frame, size_t *len) {
+  uint8_t *ptr = frame;
+  uint16_t seqNum = 0;  // Sequence number
+
+  // Frame Control: Management frame, Probe Request (0x0040)
+  *ptr++ = 0x40;  // Frame Control LSB
+  *ptr++ = 0x00;  // Frame Control MSB
+
+  // Duration: 0
+  *ptr++ = 0x00;
+  *ptr++ = 0x00;
+
+  // Destination Address: Broadcast (ff:ff:ff:ff:ff:ff)
+  *ptr++ = 0xff;
+  *ptr++ = 0xff;
+  *ptr++ = 0xff;
+  *ptr++ = 0xff;
+  *ptr++ = 0xff;
+  *ptr++ = 0xff;
+
+  // Source Address: Our MAC address
+#ifdef ARDUINO_ARCH_ESP32
+  uint8_t mac[6];
+  esp_wifi_get_mac(WIFI_IF_STA, mac);
+#else
+  uint8_t mac[6];
+  wifi_get_macaddr(STATION_IF, mac);
+#endif
+  memcpy(ptr, mac, 6);
+  ptr += 6;
+
+  // BSSID: Broadcast (ff:ff:ff:ff:ff:ff)
+  *ptr++ = 0xff;
+  *ptr++ = 0xff;
+  *ptr++ = 0xff;
+  *ptr++ = 0xff;
+  *ptr++ = 0xff;
+  *ptr++ = 0xff;
+
+  // Sequence Control: Fragment 0, Sequence number
+  uint16_t seqCtrl = (seqNum & 0x0FFF) << 4;
+  *ptr++ = seqCtrl & 0xFF;
+  *ptr++ = (seqCtrl >> 8) & 0xFF;
+
+  // SSID Information Element
+  if (strlen(PROBE_SSID) > 0) {
+    *ptr++ = 0x00;  // Element ID: SSID
+    *ptr++ = strlen(PROBE_SSID);  // Length
+    memcpy(ptr, PROBE_SSID, strlen(PROBE_SSID));
+    ptr += strlen(PROBE_SSID);
+  } else {
+    *ptr++ = 0x00;  // Element ID: SSID
+    *ptr++ = 0x00;  // Length (0 for broadcast)
+  }
+
+  // Supported Rates Information Element
+  *ptr++ = 0x01;  // Element ID: Supported Rates
+  *ptr++ = 0x08;  // Length
+  *ptr++ = 0x82;  // 1 Mbps
+  *ptr++ = 0x84;  // 2 Mbps
+  *ptr++ = 0x8b;  // 5.5 Mbps
+  *ptr++ = 0x96;  // 11 Mbps
+  *ptr++ = 0x24;  // 18 Mbps
+  *ptr++ = 0x30;  // 24 Mbps
+  *ptr++ = 0x48;  // 36 Mbps
+  *ptr++ = 0x60;  // 54 Mbps
+
+  // Extended Supported Rates Information Element (optional)
+  *ptr++ = 0x32;  // Element ID: Extended Supported Rates
+  *ptr++ = 0x04;  // Length
+  *ptr++ = 0x6c;  // 54 Mbps
+  *ptr++ = 0x12;  // 9 Mbps
+  *ptr++ = 0x18;  // 12 Mbps
+  *ptr++ = 0x60;  // 48 Mbps
+
+  *len = ptr - frame;
+
+  // Increment sequence number for next frame
+  seqNum = (seqNum + 1) % 4096;
+
+}
