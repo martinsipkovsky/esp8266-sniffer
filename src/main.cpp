@@ -85,7 +85,7 @@ static void sniffer_callback(void* buf, wifi_promiscuous_pkt_type_t type) {
   showMetadata(pkt);
 }
 
-#define CHANNEL_HOP_INTERVAL_MS   1000
+#define CHANNEL_HOP_INTERVAL_MS   350
 static unsigned long lastHop = 0;
 
 #else // ESP8266 branch (original code)
